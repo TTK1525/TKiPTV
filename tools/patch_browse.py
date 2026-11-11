@@ -29,7 +29,7 @@ replace_once('        countryOf(i)?.takeIf { it != cc }?.let { cc = it; group = 
 replace_once('        i.getStringExtra(QUERY)?.let { group = SEARCH; homeMode = false; others = emptyList(); otherState = IDLE; find.setText(it); buildRail(); filter() }','        i.getStringExtra(QUERY)?.let { group = SEARCH; homeMode = false; find.setText(it); buildRail(); filter() }')
 replace_once('        upd.check({ askUpdate(it) }, { updating(it) })\n','')
 replace_block('    private fun countryOf(i: Intent?)', '    private fun columns()')
-replace_block('    private fun load(fresh: Boolean) {','    /** "Downloading the channel listâ¦ 42%"', '''    private fun load(fresh: Boolean) {
+replace_block('    private fun load(fresh: Boolean) {','    private fun progressWords(pct: Int)', '''    replace_block('    private fun load(fresh: Boolean) {', '    private fun progressWords(pct: Int)', '''    private fun load(fresh: Boolean) {
         cc = "vn"
         Store.setCountry(this, cc)
         if (fresh && isList(group)) loadList(group.removePrefix(PL), true)
