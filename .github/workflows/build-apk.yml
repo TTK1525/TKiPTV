@@ -32,20 +32,29 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+  
       - name: Find Gradle project
         id: project
         shell: bash
         run: |
-          if [ -f gradlew ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          elif [ -f app/gradlew ]; then
-            echo "dir=app" >> "$GITHUB_OUTPUT"
-          elif [ -f app/build.gradle.kts ]; then
-            echo "dir=app" >> "$GITHUB_OUTPUT"
-          else
-            echo "Cannot locate Gradle project"
+          echo "Đang tìm dự án Gradle..."
+          find . -maxdepth 5 \
+            \( -name gradlew -o -name settings.gradle.kts -o -name settings.gradle \) \
+            -print
+
+          DIR=$(find . -maxdepth 5 -type f \
+            \( -name settings.gradle.kts -o -name settings.gradle \) \
+            -print -quit)
+
+          if [ -z "$DIR" ]; then
+            echo "Không tìm thấy settings.gradle"
             exit 1
           fi
+
+          DIR=$(dirname "$DIR")
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Đã tìm thấy dự án: $DIR"
+
 
       - name: Build debug APK
         working-directory: ${{ steps.project.outputs.dir }}
