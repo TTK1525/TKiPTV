@@ -30,8 +30,6 @@ import dev.tvremote.tvui.TvState
 import dev.tvremote.tvui.TvUi
 import java.text.Normalizer
 import java.util.concurrent.Executors
-import dev.tvremote.update.Release
-import dev.tvremote.update.SelfUpdate
 import dev.tvremote.tvui.TvScroll
 
 /**
@@ -66,13 +64,6 @@ class BrowseActivity : Activity() {
     private var failed = false
     private val plData = HashMap<String, Playlists.Result?>()         // playlist id -> its channels (null: being read), kept while the screen lives
     private var countryName = ""
-    private var others: List<List<Channel>> = emptyList()           // search: matches in other countries (GlobalIndex)
-    private var otherState = IDLE
-    private var gseq = 0
-    private var names: Map<String, String> = emptyMap()            // country code -> "🇩🇪 Germany", for the cards of other countries
-    private val searcher = Executors.newSingleThreadExecutor(Providers.screenThread)
-    private val globalRun = Runnable { searchOthers() }
-
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         if (b == null) HomeRows.favourites(this)                       // the row Android's launchers show, from favourites saved before it existed
@@ -97,7 +88,7 @@ class BrowseActivity : Activity() {
             visibility = View.GONE                                    // only in search mode (the first row of the side list)
             setOnEditorActionListener { v, _, _ -> hideKeys(v); firstCard(); true }
             addTextChangedListener(object : TextWatcher {
-                override fun afterTextChanged(s: Editable?) { if (group == SEARCH) scheduleOthers(); filter() }
+                override fun afterTextChanged(s: Editable?) { filter() }
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             })
@@ -134,9 +125,8 @@ class BrowseActivity : Activity() {
         // the whole screen's own state, centred on the screen (not on the grid): loading, or no list and why
         state = TvState(this)
         state.add(TvUi.button(this, getString(R.string.retry)) { load(true) })
-        state.add(TvUi.button(this, getString(R.string.country)) { countries() })
         setContentView(FrameLayout(this).apply { addView(root, FrameLayout.LayoutParams(-1, -1)); addView(shelves.view, FrameLayout.LayoutParams(-1, -1)); addView(state, FrameLayout.LayoutParams(-1, -1)) })
-        cc = countryOf(intent) ?: Store.country(this)
+        cc = "vn"
         groupOf(intent)?.let { group = it; pendingRow = rowOf(it) }
         keepGroup?.let { group = it; keepGroup = null }                // the language changed: the same group, not the first
         intent.getStringExtra(QUERY)?.let { group = SEARCH; homeMode = false; find.setText(it) }
@@ -153,17 +143,15 @@ class BrowseActivity : Activity() {
 
     override fun onNewIntent(i: Intent) {
         super.onNewIntent(i)
-        countryOf(i)?.takeIf { it != cc }?.let { cc = it; group = ALL; homeMode = true; load(false) }
         groupOf(i)?.let {
             find.setText("")
             if (catRes != null) { homeMode = true; group = ALL; filter(); refreshHome(); if (!shelves.focusRow(rowOf(it))) shelves.focusFirst() } else pick(it)
         }
-        i.getStringExtra(QUERY)?.let { group = SEARCH; homeMode = false; others = emptyList(); otherState = IDLE; find.setText(it); buildRail(); filter() }
+        i.getStringExtra(QUERY)?.let { group = SEARCH; homeMode = false; find.setText(it); buildRail(); filter() }
     }
 
     override fun onResume() {
         super.onResume(); cards.notifyDataSetChanged(); if (homeShown()) shelves.refreshCards() else if (mine(group) != null) { buildRail(); filter() }
-        upd.check({ askUpdate(it) }, { updating(it) })
     }
 
     /** A group link (a pin on the home screen): the favourites or one of the groups, when it still exists. */
@@ -213,74 +201,47 @@ class BrowseActivity : Activity() {
     }
     private fun mineName(gid: String) = if (gid == Store.FAV) getString(R.string.favourites) else Store.group(this, gid)?.name ?: ""
 
-    private fun countryOf(i: Intent?) = i?.data?.takeIf { it.scheme == "tvchannels" && it.host == "country" }
-        ?.pathSegments?.firstOrNull()?.lowercase()?.takeIf { it.length == 2 }
-
     private fun columns() = (resources.displayMetrics.widthPixels / resources.displayMetrics.density - 280).let { (it / 130).toInt().coerceIn(2, 7) }
 
+    // TKIPTV_LITE_PATCH_V3
     private fun load(fresh: Boolean) {
+        cc = "vn"
         Store.setCountry(this, cc)
-        if (fresh && isList(group)) loadList(group.removePrefix(PL), true)   // Refresh on a playlist reads that link again too
-        all = emptyList(); failed = false; loading = true; catRes = null
+        if (fresh && isList(group)) loadList(group.removePrefix(PL), true)
+        all = emptyList()
+        failed = false
+        loading = true
+        catRes = null
+        countryName = "TKiPTV"
         chrome()
-        val country = cc
         io.execute {
-            var last = -1
-            val iptv = Catalog.iptv(this, country, fresh) { got, total ->      // a bar while the list comes in (total -1: not told: the spinner stays)
-                val pct = if (total > 0) (got * 100 / total).toInt().coerceAtMost(100) else -1
-                if (pct != last) { last = pct; main.post { if (loading && country == cc) state.loading(progressWords(pct), pct) } }
-            }
-            // the first screen is iptv-org's list alone (one request); the providers' channels and the categories need more requests
-            // (a slow TV measured them at most of the old 5 s wait), so they come after, unless all kept: then nothing to wait for
-            val quick = !fresh && Providers.warm(this, country) && Categories.current(this, country) != null && !Categories.stale(this, country)
-            var list = if (quick) Providers.merge(this, country, iptv, false) else iptv
-            var doc = Categories.current(this, country)               // the kept copy at once; the site is asked only when there is none (or Refresh)
-            val known = Catalog.young(this, "countries.json")
-            fun nameOf() = Catalog.countries(this).firstOrNull { it.code == country }?.let { "${it.flag} ${it.name}" } ?: country.uppercase()
-            fun full(l: List<Channel>, d: Categories.Doc?) = if (d == null || d.also.isEmpty()) l else l + Categories.alsoKept(this, country, d)   // + the other countries' channels the file asks for (kept copy)
-            fun show(l: List<Channel>, name: String, res: Categories.Result?, first: Boolean) = main.post {
-                if (isDestroyed || country != cc) return@post          // gone, or another country was chosen meanwhile
-                all = l.byChannel(); failed = l.isEmpty() && !java.io.File(filesDir, "m3u-$country.m3u").exists(); countryName = name; loading = false; catRes = res
-                if (homeShown() && group != SEARCH) group = ALL
-                if (mine(group) == null && !isList(group) && group != ALL && group != SEARCH && all.none { it.first().group == group }) group = ALL
-                buildRail(); filter()
-                if (!first) { refreshHome(); return@post }              // the person may be on a card already: it keeps the focus
-                if (homeShown()) {
-                    refreshHome()
-                    val p = pendingRow; pendingRow = null
-                    if (p == null || !shelves.focusRow(p)) shelves.focusFirst()
-                } else if (!find.hasFocus()) grid.post { (grid.getChildAt(0) ?: rail.getChildAt(0))?.requestFocus() }
-            }
-            if (quick) {
-                val l2 = full(list, doc)
-                val res = doc?.let { Categories.categorize(it, l2.byChannel()) }
-                show(l2, nameOf(), res, true)
-            } else {
-                main.post { if (loading && country == cc) state.loading(getString(R.string.loading_read), 100) }
-                if (iptv.isNotEmpty()) { show(list, if (known) nameOf() else country.uppercase(), doc?.let { Categories.categorize(it, list.byChannel()) }, true) }
-                val cats = if (doc == null || fresh) Providers.async { Categories.refresh(this, country, fresh) } else null   // beside the providers
-                list = Providers.merge(this, country, iptv, fresh)
-                if (cats != null) { Providers.join(cats); doc = Categories.current(this, country) }
-                val l2 = full(list, doc)
-                val res = doc?.let { Categories.categorize(it, l2.byChannel()) }
-                show(l2, nameOf(), res, false)
-            }
-            // the other countries' channels the file asks for: kept ones were on the screen already; the index (3 MB, once a day) comes last, so it never delays the first screen
-            Categories.current(this, country)?.takeIf { Categories.alsoStale(this, country, it) }?.let { d ->
-                if (Categories.alsoFetch(this, country, d).isNotEmpty()) {
-                    val l2 = full(list, d); val res = Categories.categorize(d, l2.byChannel())
-                    show(l2, nameOf(), res, false)
+            var previous = -2
+            val channels = Catalog.iptv(this, cc, fresh) { got, total ->
+                val pct = if (total > 0) (got * 100L / total).toInt().coerceIn(0, 100) else -1
+                if (pct != previous) {
+                    previous = pct
+                    main.post {
+                        if (!isDestroyed && loading) state.loading(progressWords(pct), pct)
+                    }
                 }
             }
-            if (Categories.stale(this, country)) {                    // a day old: the site's newer file is used next time, or now if it changed what is shown
-                Categories.refresh(this, country)
-                val now = Categories.current(this, country)
-                if (now != null && now !== doc) { val r2 = Categories.categorize(now, full(list, now).byChannel()); main.post { if (!isDestroyed && country == cc) { catRes = r2; refreshHome() } } }
+            main.post {
+                if (isDestroyed) return@post
+                all = channels.byChannel()
+                failed = channels.isEmpty()
+                loading = false
+                countryName = "TKiPTV"
+                if (mine(group) == null && !isList(group) && group != ALL &&
+                    group != SEARCH && all.none { it.first().group == group }) group = ALL
+                buildRail()
+                filter()
+                if (!find.hasFocus()) grid.post {
+                    (grid.getChildAt(0) ?: rail.getChildAt(0))?.requestFocus()
+                }
             }
         }
     }
 
-    /** "Downloading the channel list… 42%" for the bar; no number before the size is told. */
     private fun progressWords(pct: Int) = if (pct < 0) getString(R.string.loading) else getString(R.string.loading_pct, pct)
 
     private fun buildRail() {
@@ -375,20 +336,15 @@ class BrowseActivity : Activity() {
         val searching = group == SEARCH
         TvUi.show(find, searching)
         if (!searching) {
-            GlobalIndex.release(); main.removeCallbacks(globalRun); gseq++
+            // Tìm kiếm chỉ trong playlist TKiPTV
             if (find.text.isNotEmpty()) { find.setText(""); return }  // its watcher comes back here
         }
         val q = if (searching) Find.fold(find.text.toString()) else ""
         shown = when {
             searching -> {
-                val local = if (q.isEmpty()) emptyList() else all.mapNotNull { ch -> GlobalIndex.rank(Find.fold(ch.first().name), q)?.let { it to ch } }.sortedBy { it.first }.map { it.second }
-                local + when {
-                    q.isEmpty() -> emptyList()
-                    otherState == LOADING -> listOf(header(getString(R.string.searching_all)))
-                    otherState == OFFLINE -> listOf(header(getString(R.string.other_offline)))
-                    otherState == DONE && others.isNotEmpty() -> listOf(header(getString(R.string.other_countries))) + others
-                    else -> emptyList()
-                }
+                if (q.isEmpty()) emptyList() else all.mapNotNull { ch ->
+                    GlobalIndex.rank(Find.fold(ch.first().name), q)?.let { it to ch }
+                }.sortedBy { it.first }.map { it.second }
             }
             gid != null -> live(Store.channels(this, gid).byChannel())
             pl != null -> plData[pl]?.channels?.byChannel().orEmpty()
@@ -404,7 +360,7 @@ class BrowseActivity : Activity() {
         chrome()
         when {
             searching && q.isEmpty() -> say(getString(R.string.search_hint), false)
-            searching && otherState == DONE && shown.isEmpty() -> say(getString(R.string.no_match), false)
+            searching && q.isNotEmpty() && shown.isEmpty() -> say(getString(R.string.no_match), false)
             pl != null && shown.isEmpty() -> say(getString(when {
                 !plData.containsKey(pl) || plData[pl] == null -> R.string.loading
                 plData[pl]?.ok != true -> R.string.list_failed
@@ -431,7 +387,7 @@ class BrowseActivity : Activity() {
 
     /** The first row of the side list: the field gets the focus and the keyboard, and results come from every country. */
     private fun enterSearch() {
-        homeMode = false; group = SEARCH; others = emptyList(); otherState = IDLE
+        homeMode = false; group = SEARCH
         find.setText("")
         buildRail(); filter()
         find.requestFocus()
@@ -439,31 +395,6 @@ class BrowseActivity : Activity() {
     }
 
     /** The text changed: ask the global index after a pause (the first time it is downloaded, and the card says so). */
-    private fun scheduleOthers() {
-        main.removeCallbacks(globalRun)
-        val q = Find.fold(find.text.toString())
-        if (q.length < 2) { gseq++; others = emptyList(); otherState = IDLE; return }
-        if (!GlobalIndex.held()) { others = emptyList(); otherState = LOADING }
-        main.postDelayed(globalRun, 120)
-    }
-
-    private fun searchOthers() {
-        val q = Find.fold(find.text.toString())
-        if (group != SEARCH || q.length < 2) return
-        val n = ++gseq
-        searcher.execute {
-            val idx = GlobalIndex.get(this)
-            val res = idx?.search(q, cc).orEmpty()
-            if (idx != null && names.isEmpty()) names = Catalog.countries(this).associate { it.code to "${it.flag} ${it.name}" }
-            main.post {
-                if (isDestroyed || n != gseq || group != SEARCH) return@post
-                val here = all.mapTo(HashSet()) { it.first().id.substringBefore('@') }   // the country's list carries some (its "also" ones): not twice
-                others = res.filter { it.first().id.substringBefore('@') !in here }; otherState = if (idx == null) OFFLINE else DONE
-                filter()
-            }
-        }
-    }
-
     private fun say(s: String, again: Boolean) { note.text = s; TvUi.show(note, s.isNotEmpty()) }
 
     /** One state for the whole screen while there is no list to show: loading (a spinner), offline or empty (the words, Retry, Country). */
@@ -538,9 +469,9 @@ class BrowseActivity : Activity() {
     private fun newGroup() = Tool(R.drawable.ic_plus, getString(R.string.new_group)) { ask(getString(R.string.new_group), "") { pick(MINE + Store.addGroup(this, it)) } }
     private fun addLink() = if (Store.playlists(this).size < Edit.MAX_LISTS) Tool(R.drawable.ic_link, getString(R.string.list_add)) { addList() } else null
     private fun settings() = listOf(
-        Tool(R.drawable.ic_globe, countryName.ifEmpty { getString(R.string.country) }) { countries() },
         Tool(R.drawable.ic_subtitle, getString(R.string.lang, langName(Lang.pref(this)))) { languages() },
-        Tool(R.drawable.ic_refresh, getString(R.string.refresh)) { load(true) })
+        Tool(R.drawable.ic_refresh, getString(R.string.refresh)) { load(true) }
+    )
 
     /** Everything that is not "watch a channel", out of the way of the shelves: opened by "⋯" or the Menu key. */
     private fun homeMenu() {
@@ -653,44 +584,6 @@ class BrowseActivity : Activity() {
         box.post { box.getChildAt(1 + Lang.CHOICES.indexOf(now))?.requestFocus() }
     }
 
-    private val upd by lazy { SelfUpdate(this, "channels", "tv-channels.apk") }
-
-    /** A newer TV Channels in the latest release (SelfUpdate): Update now / Later / Skip this version; Back is a later too. */
-    private fun askUpdate(r: Release) {
-        val (dlg, box) = TvUi.sheet(this, R.style.Dialog, 420)
-        TvUi.sheetTitle(box, getString(R.string.upd_title, r.version))
-        TvUi.sheetNote(box, getString(R.string.upd_note, upd.version()))
-        box.addView(TvUi.row(this, R.drawable.ic_download, getString(R.string.upd_now)) { dlg.dismiss(); updating(r) })
-        box.addView(TvUi.row(this, R.drawable.ic_clock, getString(R.string.upd_later)) { upd.later(); dlg.dismiss() })
-        box.addView(TvUi.row(this, R.drawable.ic_eye_off, getString(R.string.upd_skip)) { upd.skip(r); dlg.dismiss() })
-        dlg.show()
-        box.post { box.getChildAt(2)?.requestFocus() }
-    }
-
-    /** Its download, with Cancel (and Back); at 100 % Android's installer takes over with its own question. */
-    private fun updating(r: Release) {
-        val (dlg, box) = TvUi.sheet(this, R.style.Dialog, 420)
-        TvUi.sheetTitle(box, getString(R.string.upd_title, r.version))
-        val line = TvUi.sheetNote(box, getString(R.string.upd_loading, 0))
-        box.addView(TvUi.row(this, R.drawable.ic_close, getString(R.string.upd_cancel)) { dlg.dismiss() })
-        dlg.setOnDismissListener { upd.cancel() }
-        dlg.show()
-        box.post { box.getChildAt(2)?.requestFocus() }
-        val started = upd.install(r, { pct ->
-            line.text = getString(R.string.upd_loading, pct)
-            if (pct >= 100) { dlg.setOnDismissListener(null); dlg.dismiss() }
-        }, { m ->
-            dlg.setOnDismissListener(null); dlg.dismiss()
-            val (d2, b2) = TvUi.sheet(this, R.style.Dialog, 420)
-            TvUi.sheetTitle(b2, getString(R.string.upd_title, r.version))
-            TvUi.sheetNote(b2, getString(R.string.upd_failed, m))
-            b2.addView(TvUi.row(this, R.drawable.ic_check, getString(R.string.ok)) { d2.dismiss() })
-            d2.show(); b2.post { b2.getChildAt(2)?.requestFocus() }
-        })
-        if (!started) { dlg.setOnDismissListener(null); dlg.dismiss() }  // Android's "install unknown apps" first: back from it, onResume goes on
-    }
-
-    /** Which of the person's groups [ch] is in: a tick on each, OK puts it in or takes it out; and a new group with it in. */
     private fun groupsFor(ch: List<Channel>) {
         val (dlg, box) = TvUi.sheet(this, R.style.Dialog)
         val id = ch.first().id
@@ -713,29 +606,6 @@ class BrowseActivity : Activity() {
     }
 
     /** The reminders set: OK on one removes it. */
-    private fun remindList() {
-        val items = Reminders.all(this).sortedBy { it.start }
-        if (items.isEmpty()) { buildRail(); return }
-        val (dlg, box) = TvUi.sheet(this, R.style.Dialog, 560)
-        TvUi.sheetTitle(box, getString(R.string.remind_list))
-        var left = items.size
-        for (r in items) {
-            lateinit var row: View
-            row = TvUi.row(this, R.drawable.ic_close, "${Guide.hm(r.start)}  ${r.title} · ${r.name}") {
-                Reminders.remove(this, r); buildRail()
-                val at = box.indexOfChild(row)                        // only this row goes; the focus moves to its neighbour, not back to the top
-                val to = box.getChildAt(at + 1)?.takeIf { it.isFocusable } ?: box.getChildAt(at - 1)?.takeIf { it.isFocusable }
-                box.removeView(row)
-                if (--left == 0) dlg.dismiss() else to?.requestFocus()
-            }
-            box.addView(row)
-        }
-        box.addView(TvUi.text(this, getString(R.string.remind_list_hint), 14f, TvUi.DIM).apply { setPadding(TvUi.dp(this@BrowseActivity, 12).toInt(), TvUi.dp(this@BrowseActivity, 8).toInt(), 0, 0) })
-        dlg.show()
-        box.post { box.getChildAt(1)?.requestFocus() }
-    }
-
-    /** One group's menu: pin it to the Home screen; the person's own groups can also be renamed and deleted. */
     private fun groupMenu(gid: String) {
         val (dlg, box) = TvUi.sheet(this, R.style.Dialog)
         val name = mineName(gid)
@@ -795,79 +665,6 @@ class BrowseActivity : Activity() {
         f.requestFocus(); f.post { f.raise() }
     }
 
-    private fun countries() {
-        val (dlg, box) = TvUi.sheet(this, R.style.Dialog, 420)
-        var preBack: () -> Boolean = { false }
-        var swallowUp = false                                      // the Back that left the field must not close the modal on its key-up
-        val q = TvUi.field(this, getString(R.string.country), 15f, EditorInfo.IME_ACTION_SEARCH, TvUi.FIELD_REST, TvUi.R_FIELD, 14, 7).apply {
-            first = { k, e -> k == KeyEvent.KEYCODE_BACK && e.action == KeyEvent.ACTION_DOWN && preBack() }   // Back while the keyboard is up goes to the keyboard first: caught here, before it
-        }
-        box.addView(q, LinearLayout.LayoutParams(-1, TvUi.dp(this, 42).toInt()).apply { bottomMargin = TvUi.dp(this@BrowseActivity, 8).toInt() })
-        val list = RecyclerView(this).apply { layoutManager = LinearLayoutManager(this@BrowseActivity) }
-        val none = TvUi.text(this, getString(R.string.country_loading), 17f, TvUi.DIM).apply { gravity = Gravity.CENTER }   // until the list comes
-        val lh = (resources.displayMetrics.heightPixels * 0.62).toInt()
-        box.addView(FrameLayout(this).apply {
-            addView(list, FrameLayout.LayoutParams(-1, -1)); addView(none, FrameLayout.LayoutParams(-1, -1))
-        }, LinearLayout.LayoutParams(-1, lh))
-        io.execute {
-            val every = Catalog.countries(this)
-            main.post {
-                if (!dlg.isShowing) return@post
-                none.text = getString(if (every.isEmpty()) R.string.offline else R.string.country_none)       // nothing came: the network, not "no country"
-                none.visibility = if (every.isEmpty()) View.VISIBLE else View.GONE
-                var now = every.sortedBy { it.code != cc }
-                val ad = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-                    override fun getItemCount() = now.size
-                    override fun onCreateViewHolder(p: ViewGroup, t: Int) = object : RecyclerView.ViewHolder(
-                        TvUi.row(this@BrowseActivity, 0, "") {}.apply { layoutParams = RecyclerView.LayoutParams(-1, -2) }) {}
-                    override fun onBindViewHolder(h: RecyclerView.ViewHolder, i: Int) {
-                        val k = now[i]; val row = h.itemView as LinearLayout
-                        (row.getChildAt(0) as TextView).text = "${k.flag}  ${k.name}"
-                        row.isActivated = k.code == cc
-                        row.setOnClickListener { dlg.dismiss(); if (k.code != cc) { cc = k.code; group = ALL; homeMode = true; find.setText(""); load(false) } }
-                    }
-                }
-                list.adapter = ad
-                // Back / the keyboard's action key leave the field for the results (the selected country, else the first); Down and Up cross between them
-                val imm = (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
-                val toList = fun(): Boolean {
-                    if (now.isEmpty()) return false
-                    val at = now.indexOfFirst { it.code == cc }.coerceAtLeast(0)
-                    list.scrollToPosition(at)
-                    list.post { (list.findViewHolderForAdapterPosition(at)?.itemView ?: list.getChildAt(0))?.requestFocus() }
-                    return true
-                }
-                q.setOnEditorActionListener { _, _, _ -> imm.hideSoftInputFromWindow(q.windowToken, 0); toList(); true }
-                preBack = { if (q.text.isNotEmpty() && now.isNotEmpty()) { swallowUp = true; imm.hideSoftInputFromWindow(q.windowToken, 0); toList() } else false }
-                dlg.setOnKeyListener { _, k, e ->
-                    val down = e.action == KeyEvent.ACTION_DOWN
-                    if (k == KeyEvent.KEYCODE_BACK && !down && swallowUp) { swallowUp = false; return@setOnKeyListener true }
-                    when {
-                        k == KeyEvent.KEYCODE_BACK && q.hasFocus() && q.text.isNotEmpty() && now.isNotEmpty() -> {
-                            if (down) { imm.hideSoftInputFromWindow(q.windowToken, 0); toList() }; true }
-                        k == KeyEvent.KEYCODE_DPAD_DOWN && q.hasFocus() && now.isNotEmpty() -> { if (down) toList(); true }
-                        k == KeyEvent.KEYCODE_DPAD_UP && down && list.hasFocus() &&
-                            (list.layoutManager as LinearLayoutManager).findFirstCompletelyVisibleItemPosition() <= 0 &&
-                            list.findContainingViewHolder(dlg.currentFocus ?: q)?.bindingAdapterPosition == 0 -> { q.requestFocus(); true }
-                        else -> false
-                    }
-                }
-                q.addTextChangedListener(object : TextWatcher {
-                    override fun afterTextChanged(s: Editable?) {
-                        val f = fold(s.toString())
-                        now = if (f.isEmpty()) every.sortedBy { it.code != cc } else every.filter { fold(it.name).contains(f) || it.code == f }
-                        ad.notifyDataSetChanged()
-                        none.visibility = if (now.isEmpty()) View.VISIBLE else View.GONE
-                    }
-                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                })
-                list.post { list.getChildAt(0)?.requestFocus() }
-            }
-        }
-        dlg.show()
-    }
-
     override fun onKeyDown(k: Int, e: KeyEvent): Boolean {
         val v0 = currentFocus
         if (homeShown() && shelves.view.visibility == View.VISIBLE) {      // the shelves: their own D-pad; Menu on a card is its menu (hold OK is the card's own long click), Menu elsewhere the "⋯" menu
@@ -920,9 +717,9 @@ class BrowseActivity : Activity() {
         }
     }
 
-    override fun onStop() { GlobalIndex.release(); super.onStop() }
+    override fun onStop() { super.onStop() }
 
-    override fun onDestroy() { main.removeCallbacks(globalRun); searcher.shutdownNow(); GlobalIndex.release(); watching?.let { Store.unwatch(this, it) }; io.shutdownNow(); guides.shutdownNow(); super.onDestroy() }
+    override fun onDestroy() { watching?.let { Store.unwatch(this, it) }; io.shutdownNow(); guides.shutdownNow(); super.onDestroy() }
 
     /** Stable ids: a list drawn again (a favourite or a group changed) keeps the focus on the same channel, not on whatever card took its place. */
     private inner class Cards : RecyclerView.Adapter<Cards.H>() {
