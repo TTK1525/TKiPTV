@@ -32,36 +32,3 @@
     </shortcut>
 
 </shortcuts>
-<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <!-- TKiPTV - Danh sach kenh yeu thich -->
-    <shortcut
-        android:shortcutId="favourites"
-        android:enabled="true"
-        android:icon="@drawable/icon"
-        android:shortcutShortLabel="@string/sc_favs_short"
-        android:shortcutLongLabel="@string/sc_favs_long">
-
-        <intent
-            android:action="android.intent.action.VIEW"
-            android:data="tvchannels://group/fav"
-            android:targetPackage="com.tkiptv.dev"
-            android:targetClass="dev.tvremote.channels.BrowseActivity" />
-    </shortcut>
-
-    <!-- TKiPTV - Tim kiem kenh -->
-    <shortcut
-        android:shortcutId="search"
-        android:enabled="true"
-        android:icon="@drawable/icon"
-        android:shortcutShortLabel="@string/sc_search_short"
-        android:shortcutLongLabel="@string/sc_search_long">
-
-        <intent
-            android:action="android.intent.action.VIEW"
-            android:data="tvchannels://find"
-            android:targetPackage="com.tkiptv.dev"
-            android:targetClass="dev.tvremote.channels.PlayActivity" />
-    </shortcut>
-
-</shortcuts>
