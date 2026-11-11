@@ -121,13 +121,24 @@ between('    private fun remindList() {', '    private fun groupMenu(gid: String
 for line in ('import dev.tvremote.update.Release\n', 'import dev.tvremote.update.SelfUpdate\n'):
     one(line, optional=True)
 
-# Check that no removed function is still called.
-for forbidden in ('Providers.merge(', 'Providers.warm(', 'Categories.refresh(',
-                  'upd.check(', 'countries()', 'scheduleOthers()',
-                  'searchOthers()', 'remindList()', 'otherState', 'globalRun'):
+
+# Kiểm tra các chức năng đã loại bỏ khỏi TKiPTV Lite.
+# Tạm giữ remindList() vì chức năng nhắc lịch chưa được gỡ hoàn toàn.
+for forbidden in (
+    'Providers.merge(',
+    'Providers.warm(',
+    'Categories.refresh(',
+    'upd.check(',
+    'countries()',
+    'scheduleOthers()',
+    'searchOthers()',
+    'otherState',
+    'globalRun'
+):
     if forbidden in s:
         raise RuntimeError(f'Còn tham chiếu cần kiểm tra: {forbidden}')
 
 FILE.write_text(s, encoding='utf-8')
 print('Đã áp dụng bản vá TKiPTV Lite V3 cho BrowseActivity.kt.')
 print('Chưa xác nhận Gradle build; hãy chạy workflow build APK tiếp theo.')
+
