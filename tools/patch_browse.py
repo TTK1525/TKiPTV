@@ -110,8 +110,11 @@ between('    private fun countries() {', '    override fun onKeyDown(k: Int, e: 
 between('    private val upd by lazy', '    private fun groupsFor(ch: List<Channel>)')
 
 # Remove reminder menu entries and dialog, retaining the EPG guide itself.
-between('        val rem = Reminders.all(this).size', '        for (g in Store.groups(this))')
-between('        val rem = Reminders.all(this).size', '        for (t in listOfNotNull(newGroup(), addLink()))')
+
+# V3.1: Tạm giữ nguyên phần nhắc lịch để tránh xóa nhầm
+# các khối có mốc trùng nhau.
+# Sẽ xử lý riêng sau khi kiểm tra BrowseActivity.kt.
+
 between('    private fun remindList() {', '    private fun groupMenu(gid: String)')
 
 # Strip imports that would otherwise refer to deleted code.
