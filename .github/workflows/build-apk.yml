@@ -1,0 +1,74 @@
+
+name: Build TKiPTV APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Find Gradle project
+        id: project
+        shell: bash
+        run: |
+          if [ -f gradlew ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f app/gradlew ]; then
+            echo "dir=app" >> "$GITHUB_OUTPUT"
+          elif [ -f app/build.gradle.kts ]; then
+            echo "dir=app" >> "$GITHUB_OUTPUT"
+          else
+            echo "Cannot locate Gradle project"
+            exit 1
+          fi
+
+      - name: Build debug APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew :tvchannels:assembleDebug \
+              --stacktrace
+          else
+            gradle :tvchannels:assembleDebug \
+              --stacktrace
+          fi
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p output
+          find . -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print -exec cp {} output/ \;
+          test -n "$(find output -name '*.apk' -print -quit)"
+
+      - name: Upload TKiPTV APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TKiPTV-Debug-APK
+          path: output/*.apk
+          if-no-files-found: error
+          retention-days: 14
