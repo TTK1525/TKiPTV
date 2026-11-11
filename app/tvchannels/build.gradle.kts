@@ -12,7 +12,7 @@ android {
     namespace = "dev.tvremote.channels"
     compileSdk = 35
     defaultConfig {
-        applicationId = "dev.tvremote.channels"
+        applicationId = "com.tkiptv.dev"
         minSdk = 21
         targetSdk = 34
         versionName = appVersion
